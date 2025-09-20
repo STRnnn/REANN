@@ -1,6 +1,0 @@
-#==============param for atomic energy=======================
-  neigh_atoms=60
-  cutoff=5e0
-  nipsin=2
-  atomtype=['O', 'C', 'Ni']
-  nwave=8
