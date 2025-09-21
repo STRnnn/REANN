@@ -1,4 +1,7 @@
 #! /usr/bin/env python3
+from src.LKF import LKFOptimizer
+from src.KFWrapper import KFOptimizerWrapper
+from src.optimize_KF import *
 import time
 from src.read import *
 from src.dataloader import *
@@ -47,16 +50,16 @@ elif start_table==4:
 #==============================train data loader===================================
 dataloader_train=DataLoader(com_coor_train,abpropset_train,numatoms_train,\
 species_train,atom_index_train,shifts_train,batchsize_train,min_data_len=min_data_len_train,shuffle=True)
-#=================================validation data loader=================================
-dataloader_val=DataLoader(com_coor_val,abpropset_val,numatoms_val,\
-species_val,atom_index_val,shifts_val,batchsize_val,min_data_len=min_data_len_val,shuffle=False)
+#=================================test data loader=================================
+dataloader_test=DataLoader(com_coor_test,abpropset_test,numatoms_test,\
+species_test,atom_index_test,shifts_test,batchsize_test,min_data_len=min_data_len_test,shuffle=False)
 # dataloader used for load the mini-batch data
 if torch.cuda.is_available(): 
     data_train=CudaDataLoader(dataloader_train,device,queue_size=queue_size)
-    data_val=CudaDataLoader(dataloader_val,device,queue_size=queue_size)
+    data_test=CudaDataLoader(dataloader_test,device,queue_size=queue_size)
 else:
     data_train=dataloader_train
-    data_val=dataloader_val
+    data_test=dataloader_test
 #==============================oc nn module=================================
 # outputneuron=nwave for each orbital have a different coefficients
 ocmod_list=[]
@@ -74,7 +77,7 @@ if start_table == 4:
     nnmodlist.append(nnmod1)
     nnmodlist.append(nnmod2)
 #=========================create the module=========================================
-Prop_class=Property(getdensity,nnmodlist).to(device).to(torch_dtype)  # to device must be included
+Prop_class=Property(getdensity,nnmodlist).to(device)  # to device must be included
 
 ##  used for syncbn to synchronizate the mean and variabce of bn 
 #Prop_class=torch.nn.SyncBatchNorm.convert_sync_batchnorm(Prop_class).to(device)
@@ -88,26 +91,28 @@ if world_size>1:
 loss_fn=Loss()
 
 #define optimizer
-optim=torch.optim.AdamW(Prop_class.parameters(), lr=start_lr, weight_decay=re_ceff)
+#optim=torch.optim.AdamW(Prop_class.parameters(), lr=start_lr, weight_decay=re_ceff)
+optim=LKFOptimizer(Prop_class.parameters(), kalman_lambda=0.98, kalman_nue=0.9987, block_size=14855) 
+#blocksize h2o:4081,co2:14855
 
-# learning rate scheduler 
-scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optim,factor=decay_factor,patience=patience_epoch,min_lr=end_lr)
-
+# learning rate scheduler
+# scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optim,factor=decay_factor,patience=patience_epoch,min_lr=end_lr)
+ 
 #define the restart
 restart=Restart(optim)
 
 # load the model from EANN.pth
-if table_init==1:
-    restart(Prop_class,"REANN.pth")
-    nnmod.initpot[0]=initpot
-    if optim.param_groups[0]["lr"]>start_lr: optim.param_groups[0]["lr"]=start_lr  #for restart with a learning rate 
-    if optim.param_groups[0]["lr"]<end_lr: optim.param_groups[0]["lr"]=start_lr  #for restart with a learning rate 
-    lr=optim.param_groups[0]["lr"]
+lr = start_lr
+if table_init == 1:
+    restart(Prop_class, "REANN.pth")
+    nnmod.initpot[0] = initpot
+    if hasattr(optim, 'param_groups') and len(optim.param_groups) > 0:
+        lr = optim.param_groups[0]["lr"]
+        lr = max(min(lr, start_lr), end_lr)
     f_ceff=init_f+(final_f-init_f)*(lr-start_lr)/(end_lr-start_lr+1e-8)
     prop_ceff[1]=f_ceff
 
-
-ema = EMA(Prop_class, 0.999)
+#ema = EMA(Prop_class, 0.999)
 #==========================================================
 if dist.get_rank()==0:
     fout.write(time.strftime("%Y-%m-%d-%H_%M_%S \n", time.localtime()))
@@ -115,8 +120,11 @@ if dist.get_rank()==0:
     for name, m in Prop_class.named_parameters():
         print(name)
 #==========================================================
-Optimize(fout,prop_ceff,nprop,train_nele,val_nele,init_f,final_f,decay_factor,start_lr,end_lr,print_epoch,Epoch,\
-data_train,data_val,Prop_class,loss_fn,optim,scheduler,ema,restart,PES_Normal,device,PES_Lammps=PES_Lammps)
+# Optimize(fout,prop_ceff,nprop,train_nele,test_nele,init_f,final_f,decay_factor,start_lr,end_lr,print_epoch,Epoch,\
+# data_train,data_test,Prop_class,loss_fn,optim,scheduler,ema,restart,PES_Normal,device,PES_Lammps=PES_Lammps)
+Optimize_KF(fout,prop_ceff,nprop,train_nele,test_nele,lr,init_f,final_f,decay_factor,start_lr,end_lr,patience_epoch,print_epoch,Epoch,\
+data_train,data_test,Prop_class,loss_fn,optim,restart,PES_Normal,device,PES_Lammps=PES_Lammps)
+
 if dist.get_rank()==0:
     fout.write(time.strftime("%Y-%m-%d-%H_%M_%S \n", time.localtime()))
     fout.write("terminated normal\n")
